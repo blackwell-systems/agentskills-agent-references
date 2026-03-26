@@ -1,13 +1,9 @@
 [![Blackwell Systems™](https://raw.githubusercontent.com/blackwell-systems/blackwell-docs-theme/main/badge-trademark.svg)](https://github.com/blackwell-systems)
 [![Agent Skills](assets/badge-agentskills.svg)](https://agentskills.io)
 
-The [Agent Skills](https://agentskills.io) spec defines a Resources tier for on-demand reference files and recommends splitting large `SKILL.md` content into focused reference files. The `triggers:` field ([agentskills-subcommand-dispatch](https://github.com/blackwell-systems/agentskills-subcommand-dispatch)) handles loading those references into the calling model's context when specific subcommands are invoked.
+Orchestrator skills launch subagents: specialized agents for analysis, implementation, review, and integration. Each subagent has its own context window. Their type definitions face a tradeoff: carry every procedure unconditionally (bloated on every launch), or let the agent load references on demand (the agent may skip them, or read them too late). The [Agent Skills](https://agentskills.io) spec has no mechanism for this tier.
 
-Orchestrator skills also launch subagents: specialized agents for analysis, implementation, review, and integration. Each subagent has its own context window. Their type definitions face the same tradeoff: carry every procedure unconditionally (bloated on every launch), or let the agent load references on demand (the agent may skip them, or read them too late). The spec has no mechanism for this tier.
-
-`agent-references:` fills that gap. Skills declare which reference files belong to which subagent types. A `PreToolUse/Agent` hook reads the frontmatter and injects matching files into the subagent's initial prompt before launch.
-
-This is a different hook event and a different injection target than subcommand dispatch. `UserPromptSubmit` fires when the user submits a prompt and adds content to the calling model's context via `additionalContext`. `PreToolUse/Agent` fires when the orchestrator calls the Agent tool and modifies the subagent's `prompt` parameter via `updatedInput`. The two fields cover different stages of execution and cannot be combined into one.
+`agent-references:` fills that gap. Skills declare which reference files belong to which subagent types in YAML frontmatter. A `PreToolUse/Agent` hook reads the declarations and injects matching files into the subagent's initial prompt before launch — content is present before the subagent takes its first step.
 
 Scope: subagent launch-time injection. `agent-references:` can only act on information available at launch time (the `subagent_type` and the agent prompt). References that depend on what the subagent discovers at runtime are out of scope.
 
