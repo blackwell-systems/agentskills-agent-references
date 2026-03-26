@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# inject_agent_references — PreToolUse/Agent hook for subagent reference injection
+# Claude Code reference implementation
+#
+# Fires before every Agent tool call. For each installed skill that has an
+# inject-agent-context script, delegates to it with the subagent_type and prompt.
+# Injects matching reference file contents into the subagent's initial prompt
+# via updatedInput — content is present before the subagent takes its first step.
+#
+# This hook is a thin orchestrator. Injection logic lives in each skill's
+# inject-agent-context script, not here. Adding a new skill requires zero
+# changes to this hook.
+#
+# Key distinction from inject_skill_context (UserPromptSubmit):
+#   - inject_skill_context targets the calling model's context (additionalContext)
+#   - inject_agent_references targets the subagent's initial prompt (updatedInput)
+# Neither can substitute for the other.
+#
+# Install: copy to ~/.local/bin/ and register in settings.json
+#   "PreToolUse": [{
+#     "matcher": "Agent",
+#     "hooks": [{"type": "command", "command": "inject_agent_references"}]
+#   }]
+
+set -euo pipefail
+
+input=$(cat)
+
+tool_name=$(echo "$input" | jq -r '.tool_name // empty')
+[ "$tool_name" != "Agent" ] && exit 0
+
+subagent_type=$(echo "$input" | jq -r '.tool_input.subagent_type // empty')
+[ -z "$subagent_type" ] && exit 0
+
+prompt=$(echo "$input" | jq -r '.tool_input.prompt // empty')
+tool_input=$(echo "$input" | jq '.tool_input')
+
+# Skill directories to scan (Claude Code + cross-client convention)
+SKILL_DIRS=(
+  "$HOME/.claude/skills"
+  "$HOME/.agents/skills"
+)
+
+injected=""
+
+for base_dir in "${SKILL_DIRS[@]}"; do
+  [ -d "$base_dir" ] || continue
+
+  for skill_dir in "$base_dir"/*/; do
+    [ -d "$skill_dir" ] || continue
+    inject_script="$skill_dir/scripts/inject-agent-context"
+    [ -x "$inject_script" ] || continue
+
+    # Delegate to the skill's own injection script.
+    # CLAUDE_SKILL_DIR tells inject-agent-context where to find SKILL.md and references/.
+    result=$(CLAUDE_SKILL_DIR="$skill_dir" "$inject_script" \
+      --type "$subagent_type" --prompt "$prompt" 2>/dev/null) || true
+    [ -n "$result" ] && injected+="$result"
+  done
+done
+
+# Inject into the subagent's initial prompt via updatedInput.
+# Preserves all original tool_input fields (run_in_background, model, name, isolation, etc.)
+# — only prompt is modified.
+if [ -n "$injected" ]; then
+  jq -n --arg inject "$injected" --arg orig "$prompt" --argjson orig_input "$tool_input" \
+    '{"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+      "updatedInput": ($orig_input | .prompt = ($inject + "\n\n" + $orig))}}'
+fi
