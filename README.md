@@ -1,17 +1,17 @@
 [![Blackwell Systems™](https://raw.githubusercontent.com/blackwell-systems/blackwell-docs-theme/main/badge-trademark.svg)](https://github.com/blackwell-systems)
 [![Agent Skills](assets/badge-agentskills.svg)](https://agentskills.io)
 
-The [Agent Skills](https://agentskills.io) spec defines a Resources tier for on-demand reference files and recommends splitting large `SKILL.md` content into focused reference files loaded when needed. The `triggers:` field ([agentskills-subcommand-dispatch](https://github.com/blackwell-systems/agentskills-subcommand-dispatch)) solves this at the orchestrator tier: it loads references into the calling model's context when specific subcommands are invoked.
+The [Agent Skills](https://agentskills.io) spec defines a Resources tier for on-demand reference files and recommends splitting large `SKILL.md` content into focused reference files. The `triggers:` field ([agentskills-subcommand-dispatch](https://github.com/blackwell-systems/agentskills-subcommand-dispatch)) handles loading those references into the calling model's context when specific subcommands are invoked.
 
-But orchestrator skills frequently launch subagents — specialized agents for analysis, implementation, review, and integration. These subagents have their own context windows, and they face the same tradeoff the spec leaves open: either their type definition carries every procedure they might ever need (bloated on every launch), or they load references on demand (fragile — the agent may not load them, or loads them too late). The spec says nothing about subagents.
+Orchestrator skills also launch subagents: specialized agents for analysis, implementation, review, and integration. Each subagent has its own context window. Their type definitions face the same tradeoff: carry every procedure unconditionally (bloated on every launch), or let the agent load references on demand (the agent may skip them, or read them too late). The spec has no mechanism for this tier.
 
-This repo fixes that for agent launch time. Skills declare which reference files to inject for which subagent types. A pre-launch hook injects them into the subagent's initial prompt before it takes its first step — no model judgment required.
+`agent-references:` fills that gap. Skills declare which reference files belong to which subagent types. A `PreToolUse/Agent` hook reads the frontmatter and injects matching files into the subagent's initial prompt before launch.
 
-The hook mechanism is necessarily different from subcommand dispatch because the target is different: `UserPromptSubmit` adds content to the *calling model's* context; `PreToolUse/Agent` with `updatedInput` modifies the *subagent's initial prompt* before launch. Neither can substitute for the other.
+This is a different hook event and a different injection target than subcommand dispatch. `UserPromptSubmit` fires when the user submits a prompt and adds content to the calling model's context via `additionalContext`. `PreToolUse/Agent` fires when the orchestrator calls the Agent tool and modifies the subagent's `prompt` parameter via `updatedInput`. The two fields cover different stages of execution and cannot be combined into one.
 
-**Scope: subagent launch-time injection.** If you know at launch time which subagent type is being launched, this handles it deterministically. References that depend on the subagent's runtime state are out of scope.
+Scope: subagent launch-time injection. `agent-references:` can only act on information available at launch time (the `subagent_type` and the agent prompt). References that depend on what the subagent discovers at runtime are out of scope.
 
-> Works today via YAML extensibility — platforms that understand `agent-references:` act on it, others ignore it. The proposal asks the spec to formally recognize `agent-references:` as a top-level field. Reference implementation for Claude Code (`PreToolUse/Agent`).
+> Works today via YAML extensibility. Platforms that understand `agent-references:` act on it; others ignore it. The proposal asks the spec to formally recognize `agent-references:` as a top-level field. Reference implementation ships for Claude Code (`PreToolUse/Agent`).
 
 ## How it works
 
@@ -19,7 +19,7 @@ Skills add `agent-references:` to their YAML frontmatter. Each entry maps a suba
 
 Two layers, same declarations:
 
-**Layer 1 — Script (any orchestrator).** `scripts/inject-agent-context` ships with the skill. The orchestrator runs it before launching each subagent:
+**Layer 1 -- Script (any orchestrator).** `scripts/inject-agent-context` ships with the skill. The orchestrator runs it before launching each subagent:
 
 ```bash
 inject=$(bash ${SKILL_DIR}/scripts/inject-agent-context \
@@ -28,9 +28,9 @@ full_prompt="${inject}${agent_prompt}"
 # pass full_prompt to your agent launcher
 ```
 
-One instruction in `SKILL.md`: "run `scripts/inject-agent-context` before launching each agent and prepend the output." The orchestrator still decides what to pass — model-initiated, not deterministically enforced. But it eliminates manual per-type reference loading from the orchestrator's instructions.
+One instruction in `SKILL.md`: "run `scripts/inject-agent-context` before launching each agent and prepend the output." Model-initiated; the orchestrator decides when to call it. Eliminates manual per-type reference loading from the orchestrator's instructions.
 
-**Layer 2 — Hook (platform-native).** A `PreToolUse/Agent` hook runs the same script before the subagent launches. No orchestrator decision. The reference is in the subagent's context when it starts. Deterministic. Reference implementation ships for Claude Code.
+**Layer 2 -- Hook (platform-native).** A `PreToolUse/Agent` hook runs the same script before the subagent launches. No orchestrator decision required. The reference is in the subagent's context before its first step. Reference implementation ships for Claude Code.
 
 ## Field Definition
 
@@ -55,20 +55,20 @@ agent-references:
 
 - `agent-type`: matches the `subagent_type` parameter in the platform's agent launch call
 - `inject`: path relative to the skill directory
-- `when`: optional regex applied to the agent prompt — entry only injects when matched
-- Multiple entries per type → all injected in declaration order
-- Dedup: HTML comment markers (`<!-- injected: references/X.md -->`) prevent double-injection if the orchestrator and hook both run
+- `when`: optional regex applied to the agent prompt; entry only injects when matched
+- Multiple entries per type are all injected in declaration order
+- HTML comment markers (`<!-- injected: references/X.md -->`) prevent double-injection if the orchestrator and hook both run
 
 ## Field Format Constraints
 
-The `agent-references:` field uses the same **portable subset** of YAML as `triggers:`, ensuring reliable parsing across implementations without requiring a full YAML library:
+The `agent-references:` field uses the same portable subset of YAML as `triggers:`, parseable without a full YAML library:
 
 - Flat list of `{agent-type, inject}` entries with optional `when`
-- Single-line scalar values — no multi-line strings, no block scalars (`|`, `>`)
+- Single-line scalar values; no multi-line strings, no block scalars (`|`, `>`)
 - No YAML anchors (`&`), aliases (`*`), or tags (`!!`)
 - Values may be quoted (`"..."`) or unquoted
 
-The reference parser (`scripts/inject-agent-context`) uses awk to extract entries without external dependencies. Implementations using a full YAML parser handle this subset correctly; lightweight implementations can also conform.
+The reference parser (`scripts/inject-agent-context`) uses awk to extract entries without external dependencies. Full YAML parsers handle this subset correctly; lightweight implementations can also conform.
 
 ## Installation
 
@@ -81,13 +81,12 @@ cp scripts/inject-agent-context ~/.agents/skills/my-skill/scripts/
 chmod +x ~/.agents/skills/my-skill/scripts/inject-agent-context
 ```
 
-Add `agent-references:` to your skill's frontmatter and add an instruction to your `SKILL.md` body for platforms without hook support:
+Add `agent-references:` to your skill's frontmatter and add a fallback instruction to your `SKILL.md` body for platforms without hook support:
 
 ```markdown
-**Vendor-neutral fallback:** On platforms without PreToolUse/Agent hook support,
-run `bash ${SKILL_DIR}/scripts/inject-agent-context --type <agent-type> --prompt "<prompt>"`
+On platforms without PreToolUse/Agent hook support, run
+`bash ${SKILL_DIR}/scripts/inject-agent-context --type <agent-type> --prompt "<prompt>"`
 before launching each agent and prepend the output to the prompt.
-Agent types: analyst, implementer, ...
 ```
 
 ### The platform hook (optional, deterministic enforcement)
@@ -112,11 +111,9 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-The hook iterates all skill directories (`~/.claude/skills/`, `~/.agents/skills/`) and delegates to each skill's `inject-agent-context`. Adding a new skill requires zero hook changes.
+The hook iterates all skill directories (`~/.claude/skills/`, `~/.agents/skills/`) and delegates to each skill's `inject-agent-context`. Adding a new skill requires no hook changes.
 
-## Redundancy Model
-
-All three layers are active simultaneously:
+## Layers
 
 | Layer | Mechanism | Platform | Enforcement |
 |-------|-----------|----------|-------------|
@@ -124,26 +121,24 @@ All three layers are active simultaneously:
 | Script | `scripts/inject-agent-context` | Any platform with Bash | Orchestrator-initiated |
 | Routing table | Explicit injection instructions in SKILL.md | Any platform | Convention-based |
 
-Users get the best available layer. No regression at any level.
-
 ## Relationship to agentskills-subcommand-dispatch
 
-These two repos define complementary layers that cover the full injection surface for orchestrator skills:
+`triggers:` and `agent-references:` operate at different stages of a skill's execution:
 
 ```
 User types: /my-skill program execute
 
-UserPromptSubmit → inject_skill_context
+UserPromptSubmit -> inject_skill_context
   Reads:    triggers: in SKILL.md frontmatter
   Matches:  ^/my-skill program
   Injects:  references/program-flow.md
   Target:   Orchestrator context (additionalContext)
   Hook:     UserPromptSubmit
 
-      │
-      ▼  (orchestrator runs, calls Agent tool)
+      |
+      v  (orchestrator runs, calls Agent tool)
 
-PreToolUse/Agent → inject_agent_references
+PreToolUse/Agent -> inject_agent_references
   Reads:    agent-references: in SKILL.md frontmatter
   Matches:  subagent_type = analyst
   Injects:  references/analyst-procedure.md
@@ -151,11 +146,7 @@ PreToolUse/Agent → inject_agent_references
   Hook:     PreToolUse/Agent
 ```
 
-Neither can substitute for the other:
-- `UserPromptSubmit` fires at user prompt time — it cannot reach a subagent launched later
-- `PreToolUse/Agent` fires at agent launch time — it cannot target the orchestrator's earlier context
-
-Together they complete the spec's progressive disclosure model with deterministic enforcement at both tiers.
+`UserPromptSubmit` fires before the orchestrator starts; it has no access to agent launches that happen later. `PreToolUse/Agent` fires at each agent launch; it has no access to the orchestrator's earlier context. Both declarations live in the same frontmatter block, and each field is handled by its own hook.
 
 ## Spec Alignment
 
@@ -163,13 +154,13 @@ This project uses existing Agent Skills conventions:
 - `scripts/` directory for executable code ([spec](https://agentskills.io/specification#scripts))
 - `references/` directory for on-demand content ([spec](https://agentskills.io/specification#references))
 
-**Today:** `agent-references:` is a top-level frontmatter field. The spec does not currently define it, but YAML parsers ignore unknown fields — platforms that understand `agent-references:` act on it; those that don't ignore it with no behavior change. The alternative (`metadata: agent-references:`) is a poor fit: `metadata:` is defined as a map of string key-value pairs, and `agent-references:` requires structured list data with object entries.
+`agent-references:` is a top-level frontmatter field. The spec does not currently define it, but YAML parsers ignore unknown fields, so platforms that understand `agent-references:` act on it and those that don't see no behavior change. Nesting it under `metadata:` would be a poor fit: `metadata:` is defined as a map of string key-value pairs, and `agent-references:` requires structured list data with object entries.
 
-**The proposal:** Ask the spec to formally recognize `agent-references:` as a top-level field intended for platform consumption before agent launch — distinct from `triggers:` (which fires at user prompt time) and distinct from `metadata:` (which is passive author data, not operational platform data). See [`docs/proposal-draft.md`](docs/proposal-draft.md) for the full proposal text.
+The open proposal asks the spec to formally recognize `agent-references:` as a top-level field for platform consumption before agent launch, distinct from `triggers:` (which fires at user prompt time) and from `metadata:` (passive author data). See [`docs/proposal-draft.md`](docs/proposal-draft.md) for the full proposal text.
 
 ## Progressive Disclosure Model
 
-The Agent Skills spec defines three progressive disclosure tiers. `triggers:` (agentskills-subcommand-dispatch) provides deterministic loading at the Resources tier for orchestrators. `agent-references:` extends deterministic loading to the subagent tier:
+The Agent Skills spec defines three progressive disclosure tiers. `triggers:` provides deterministic loading at the Resources tier for orchestrators. `agent-references:` extends that to the subagent tier:
 
 | Layer | Spec name | What | When loaded |
 |-------|-----------|------|-------------|
@@ -177,11 +168,11 @@ The Agent Skills spec defines three progressive disclosure tiers. `triggers:` (a
 | 1 | **Metadata** | `name` + `description` | Session start (catalog) |
 | 2 | **Instructions** | Full `SKILL.md` body | Skill activation |
 | 3 | **Resources** (orchestrator) | Reference files via `triggers:` | Subcommand dispatch |
-| 3 | **Resources** (subagent) | Reference files via `agent-references:` | **Agent launch** (this project) |
+| 3 | **Resources** (subagent) | Reference files via `agent-references:` | Agent launch (this project) |
 
 ## Example
 
-See [`examples/saw/`](examples/saw/) for Scout-and-Wave's complete `agent-references:` configuration: 5 agent types, 14 reference entries, 2 conditional injections. The pattern reduced SAW's agent type prompts by 40–60% while ensuring procedural content is always present in subagent context rather than relying on model recall.
+See [`examples/saw/`](examples/saw/) for Scout-and-Wave's complete `agent-references:` configuration: 5 agent types, 14 reference entries, 2 conditional injections. The pattern reduced SAW's agent type prompts by 40-60% while keeping procedural content reliably present in subagent context.
 
 ## License
 
